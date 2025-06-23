@@ -1,8 +1,15 @@
 'use client';
 
-import { Suspense, useRef, useEffect, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Environment, Center, Text } from '@react-three/drei';
+import { Suspense, useRef, useState, useEffect } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import {
+  OrbitControls,
+  Text,
+  useProgress,
+  Html,
+  Bounds,
+  Environment,
+} from '@react-three/drei';
 import * as THREE from 'three';
 import { ModelData, GifSettings } from '@/app/page';
 import { LoadedModel } from '@/components/LoadedModel';
@@ -288,47 +295,23 @@ export function ModelViewer({ modelData, settings }: ModelViewerProps) {
           />
 
           {/* Environment mapping - less intense when lightmaps are present */}
-          <Environment preset='city' background={false} />
+          <Environment preset={'city'} background={false} />
 
-          <Center>
-            {modelData ? (
+          {modelData ? (
+            <Bounds fit clip observe>
               <LoadedModel
                 modelData={modelData}
-                autoRotate={settings.autoRotate}
+                autoRotate={settings.autoRotate && !isRecording}
                 rotationSpeed={settings.rotationSpeed}
                 isRecording={isRecording}
                 recordingProgress={recordingProgress}
               />
-            ) : (
-              <EmptyState />
-            )}
-          </Center>
-
-          {/* Only show ground plane and shadows if no lightmaps */}
-          {!hasLightmaps && (
-            <mesh receiveShadow rotation-x={-Math.PI / 2} position={[0, -2, 0]}>
-              <planeGeometry args={[20, 20]} />
-              <shadowMaterial opacity={0.1} />
-            </mesh>
+            </Bounds>
+          ) : (
+            <EmptyState />
           )}
         </Suspense>
       </Canvas>
-
-      {!modelData && (
-        <div className='absolute inset-0 flex items-center justify-center pointer-events-none'>
-          <div className='text-center space-y-2'>
-            <div className='w-16 h-16 mx-auto bg-gray-200 rounded-full flex items-center justify-center'>
-              <Loader2 className='w-8 h-8 text-gray-400' />
-            </div>
-            <p className='text-gray-500 font-medium'>
-              Upload a 3D model to get started
-            </p>
-            <p className='text-sm text-gray-400'>
-              Supports OBJ, FBX, GLTF, GLB, and ZIP files
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

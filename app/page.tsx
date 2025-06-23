@@ -6,6 +6,7 @@ import { ModelViewer } from '@/components/ModelViewer';
 import { ControlPanel } from '@/components/ControlPanel';
 import { Header } from '@/components/Header';
 import { Card } from '@/components/ui/card';
+import { FileLoader } from '@/lib/fileLoader';
 
 export interface ModelData {
   url: string;
@@ -14,6 +15,9 @@ export interface ModelData {
   textures?: Record<string, string>;
   auxiliaryFiles?: Record<string, string>;
   hasEmbeddedMaterials?: boolean;
+  fileLoader: FileLoader | null;
+  internalPath: string;
+  mtlPath?: string;
 }
 
 export interface GifSettings {
