@@ -1,13 +1,19 @@
 'use client';
 
-import { Suspense, useRef, useState, useEffect } from 'react';
+import {
+  Suspense,
+  useRef,
+  useState,
+  useEffect,
+  forwardRef,
+  useImperativeHandle,
+} from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import {
   OrbitControls,
   Text,
   useProgress,
   Html,
-  Bounds,
   Environment,
 } from '@react-three/drei';
 import * as THREE from 'three';
@@ -20,6 +26,15 @@ import { Button } from '@/components/ui/button';
 interface ModelViewerProps {
   modelData: ModelData | null;
   settings: GifSettings;
+  onClearFile?: () => void;
+  isRecording?: boolean;
+  recordingProgress?: number;
+  onRecordingStateChange?: (isRecording: boolean) => void;
+  onRecordingProgressChange?: (progress: number) => void;
+}
+
+export interface ModelViewerRef {
+  startRecording: () => void;
 }
 
 function LoadingFallback() {
@@ -47,271 +62,319 @@ function EmptyState() {
   );
 }
 
-export function ModelViewer({ modelData, settings }: ModelViewerProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingProgress, setRecordingProgress] = useState(0);
-  const [gifUrl, setGifUrl] = useState<string | null>(null);
-  const [showPreview, setShowPreview] = useState(false);
+export const ModelViewer = forwardRef<ModelViewerRef, ModelViewerProps>(
+  (
+    {
+      modelData,
+      settings,
+      onClearFile,
+      isRecording: externalIsRecording,
+      recordingProgress: externalRecordingProgress,
+      onRecordingStateChange,
+      onRecordingProgressChange,
+    },
+    ref
+  ) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const [recordingProgress, setRecordingProgress] = useState(0);
+    const [gifUrl, setGifUrl] = useState<string | null>(null);
+    const [showPreview, setShowPreview] = useState(false);
 
-  // Check if model has lightmaps to adjust lighting accordingly
-  const hasLightmaps =
-    modelData?.textures &&
-    (modelData.textures.lightmap || modelData.textures.light);
+    // Use external recording state if provided, otherwise use internal state
+    const actualIsRecording =
+      externalIsRecording !== undefined ? externalIsRecording : isRecording;
+    const actualRecordingProgress =
+      externalRecordingProgress !== undefined
+        ? externalRecordingProgress
+        : recordingProgress;
 
-  const startRecording = async () => {
-    if (!canvasRef.current) return;
-
-    setIsRecording(true);
-    setRecordingProgress(0);
-    setGifUrl(null);
-    setShowPreview(false);
-
-    // Wait a bit longer to ensure the scene is fully rendered
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    try {
-      // Debug: Test if we can capture a single frame first
-      console.log(
-        'Canvas dimensions:',
-        canvasRef.current.width,
-        'x',
-        canvasRef.current.height
-      );
-      const testCanvas = document.createElement('canvas');
-      testCanvas.width = canvasRef.current.width;
-      testCanvas.height = canvasRef.current.height;
-      const testCtx = testCanvas.getContext('2d');
-
-      if (testCtx) {
-        testCtx.drawImage(canvasRef.current, 0, 0);
-        const imageData = testCtx.getImageData(
-          0,
-          0,
-          testCanvas.width,
-          testCanvas.height
-        );
-        const hasContent = imageData.data.some(
-          (value, index) => index % 4 !== 3 && value > 0
-        );
-        console.log('Test frame has content:', hasContent);
+    const updateRecordingState = (recording: boolean) => {
+      if (onRecordingStateChange) {
+        onRecordingStateChange(recording);
+      } else {
+        setIsRecording(recording);
       }
+    };
 
-      const gifBlob = await recordGif(canvasRef.current, settings, (progress) =>
-        setRecordingProgress(progress)
-      );
+    const updateRecordingProgress = (progress: number) => {
+      if (onRecordingProgressChange) {
+        onRecordingProgressChange(progress);
+      } else {
+        setRecordingProgress(progress);
+      }
+    };
 
-      const url = URL.createObjectURL(gifBlob);
-      setGifUrl(url);
-      setShowPreview(true);
-    } catch (error) {
-      console.error('Error recording GIF:', error);
-    } finally {
-      setIsRecording(false);
-      setRecordingProgress(0);
-    }
-  };
+    // Check if model has lightmaps to adjust lighting accordingly
+    const hasLightmaps =
+      modelData?.textures &&
+      (modelData.textures.lightmap || modelData.textures.light);
 
-  const downloadGif = () => {
-    if (gifUrl) {
-      const link = document.createElement('a');
-      link.href = gifUrl;
-      link.download = `3d-model-animation-${Date.now()}.gif`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-  };
+    // Check if this is a GLTF/GLB model (likely from Unreal Engine)
+    const isGLTFModel = modelData?.type === 'gltf' || modelData?.type === 'glb';
 
-  const closePreview = () => {
-    setShowPreview(false);
-    if (gifUrl) {
-      URL.revokeObjectURL(gifUrl);
+    const startRecording = async () => {
+      if (!canvasRef.current) return;
+
+      updateRecordingState(true);
+      updateRecordingProgress(0);
       setGifUrl(null);
-    }
-  };
+      setShowPreview(false);
 
-  return (
-    <div className='h-full w-full bg-white rounded-lg overflow-hidden relative'>
-      {/* Generate GIF Button */}
-      {modelData && !isRecording && (
-        <div className='absolute top-4 left-4 z-10'>
-          <Button
-            onClick={startRecording}
-            className='bg-blue-500 hover:bg-blue-600 text-white shadow-lg'
-          >
-            <Camera className='mr-2 h-4 w-4' />
-            Generate GIF
-          </Button>
-        </div>
-      )}
+      // Wait a bit longer to ensure the scene is fully rendered
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      {/* Recording Status */}
-      {isRecording && (
-        <div className='absolute top-4 left-4 z-10 bg-red-500 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center space-x-2 shadow-lg'>
-          <div className='w-2 h-2 bg-white rounded-full animate-pulse'></div>
-          <span>Recording {recordingProgress}%</span>
-        </div>
-      )}
+      try {
+        // Debug: Test if we can capture a single frame first
+        console.log(
+          'Canvas dimensions:',
+          canvasRef.current.width,
+          'x',
+          canvasRef.current.height
+        );
+        const testCanvas = document.createElement('canvas');
+        testCanvas.width = canvasRef.current.width;
+        testCanvas.height = canvasRef.current.height;
+        const testCtx = testCanvas.getContext('2d');
 
-      {/* GIF Preview Modal */}
-      {showPreview && gifUrl && (
-        <div className='fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50'>
-          <div className='bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-auto'>
-            <div className='flex justify-between items-center mb-4'>
-              <h3 className='text-lg font-semibold'>GIF Preview</h3>
-              <Button
-                variant='ghost'
-                size='sm'
-                onClick={closePreview}
-                className='p-1'
-              >
-                <X className='h-4 w-4' />
-              </Button>
-            </div>
+        if (testCtx) {
+          testCtx.drawImage(canvasRef.current, 0, 0);
+          const imageData = testCtx.getImageData(
+            0,
+            0,
+            testCanvas.width,
+            testCanvas.height
+          );
+          const hasContent = imageData.data.some(
+            (value, index) => index % 4 !== 3 && value > 0
+          );
+          console.log('Test frame has content:', hasContent);
+        }
 
-            <div className='mb-4 flex justify-center'>
-              <img
-                src={gifUrl}
-                alt='Generated GIF preview'
-                className='max-w-full max-h-96 rounded-lg shadow-md'
-              />
-            </div>
+        const gifBlob = await recordGif(
+          canvasRef.current,
+          settings,
+          (progress) => updateRecordingProgress(progress)
+        );
 
-            <div className='flex gap-2 justify-end'>
-              <Button variant='outline' onClick={closePreview}>
-                Close
-              </Button>
-              <Button
-                onClick={downloadGif}
-                className='bg-green-500 hover:bg-green-600 text-white'
-              >
-                <Download className='mr-2 h-4 w-4' />
-                Download GIF
-              </Button>
+        const url = URL.createObjectURL(gifBlob);
+        setGifUrl(url);
+        setShowPreview(true);
+      } catch (error) {
+        console.error('Error recording GIF:', error);
+      } finally {
+        updateRecordingState(false);
+        updateRecordingProgress(0);
+      }
+    };
+
+    // Expose startRecording method via ref
+    useImperativeHandle(ref, () => ({
+      startRecording,
+    }));
+
+    const downloadGif = () => {
+      if (gifUrl) {
+        const link = document.createElement('a');
+        link.href = gifUrl;
+        link.download = `3d-model-animation-${Date.now()}.gif`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    };
+
+    const closePreview = () => {
+      setShowPreview(false);
+      if (gifUrl) {
+        URL.revokeObjectURL(gifUrl);
+        setGifUrl(null);
+      }
+    };
+
+    return (
+      <div className='h-full w-full bg-white rounded-lg overflow-hidden relative'>
+        {/* Model Name Display - Right Side */}
+        {modelData && (
+          <div className='absolute top-4 right-4 z-10'>
+            <div className='bg-white/90 backdrop-blur-sm rounded-lg px-4 py-2 shadow-lg border'>
+              <div className='flex items-center space-x-3'>
+                <div className='flex items-center space-x-2'>
+                  <div className='w-2 h-2 bg-green-400 rounded-full'></div>
+                  <span className='text-sm font-medium text-gray-700'>
+                    {modelData.name}
+                  </span>
+                </div>
+                {onClearFile && (
+                  <button
+                    onClick={onClearFile}
+                    className='text-gray-400 hover:text-gray-600 text-sm ml-2'
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <Canvas
-        ref={canvasRef}
-        camera={{
-          position: [
-            settings.cameraDistance,
-            settings.cameraDistance,
-            settings.cameraDistance,
-          ],
-          fov: 50,
-        }}
-        shadows
-        className='h-full w-full'
-        gl={{
-          preserveDrawingBuffer: true,
-          antialias: true,
-          alpha: false,
-          toneMapping: THREE.ACESFilmicToneMapping,
-          toneMappingExposure: 1.8, // Sketchfab-style bright exposure
-          outputColorSpace: THREE.SRGBColorSpace,
-        }}
-        scene={{ background: new THREE.Color(0xf5f5f5) }}
-      >
-        <Suspense fallback={null}>
-          {/* Adaptive lighting setup - reduce intensity when lightmaps are present */}
+        {/* Generate GIF Button - Top Left */}
+        {modelData && !actualIsRecording && (
+          <div className='absolute top-4 left-4 z-10'>
+            <Button
+              onClick={startRecording}
+              className='bg-blue-500 hover:bg-blue-600 text-white shadow-lg'
+            >
+              <Camera className='mr-2 h-4 w-4' />
+              Generate GIF
+            </Button>
+          </div>
+        )}
 
-          {/* Ambient light - reduced when lightmaps are present to preserve baked lighting */}
-          <ambientLight intensity={hasLightmaps ? 0.4 : 1.5} color={0xffffff} />
+        {/* Recording Status - Same Position as Generate Button */}
+        {actualIsRecording && (
+          <div className='absolute top-4 left-4 z-10 bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center space-x-2 shadow-lg'>
+            <div className='w-2 h-2 bg-white rounded-full animate-pulse'></div>
+            <span>Recording {actualRecordingProgress.toFixed(0)}%</span>
+          </div>
+        )}
 
-          {/* Main key light - reduced when lightmaps are present */}
-          <directionalLight
-            position={[5, 8, 5]}
-            intensity={hasLightmaps ? 1.0 : 2.5}
-            color={0xffffff}
-            castShadow={!hasLightmaps}
-            shadow-mapSize-width={2048}
-            shadow-mapSize-height={2048}
-            shadow-camera-far={50}
-            shadow-camera-left={-10}
-            shadow-camera-right={10}
-            shadow-camera-top={10}
-            shadow-camera-bottom={-10}
-          />
+        {/* GIF Preview Modal */}
+        {showPreview && gifUrl && (
+          <div className='fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50'>
+            <div className='bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-auto'>
+              <div className='flex justify-between items-center mb-4'>
+                <h3 className='text-lg font-semibold'>GIF Preview</h3>
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  onClick={closePreview}
+                  className='p-1'
+                >
+                  <X className='h-4 w-4' />
+                </Button>
+              </div>
 
-          {/* Fill light - reduced when lightmaps are present */}
-          <directionalLight
-            position={[-5, 6, -3]}
-            intensity={hasLightmaps ? 0.6 : 1.5}
-            color={0xffeedd}
-          />
+              <div className='mb-4 flex justify-center'>
+                <img
+                  src={gifUrl}
+                  alt='Generated GIF preview'
+                  className='max-w-full max-h-96 rounded-lg shadow-md'
+                />
+              </div>
 
-          {/* Rim light - reduced when lightmaps are present */}
-          <directionalLight
-            position={[0, 2, -8]}
-            intensity={hasLightmaps ? 0.5 : 1.2}
-            color={0xddddff}
-          />
+              <div className='flex gap-2 justify-end'>
+                <Button variant='outline' onClick={closePreview}>
+                  Close
+                </Button>
+                <Button
+                  onClick={downloadGif}
+                  className='bg-green-500 hover:bg-green-600 text-white'
+                >
+                  <Download className='mr-2 h-4 w-4' />
+                  Download GIF
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
-          {/* Bottom light - reduced when lightmaps are present */}
-          <directionalLight
-            position={[0, -10, 10]}
-            intensity={hasLightmaps ? 0.3 : 1.0}
-            color={0xffffff}
-          />
+        <Canvas
+          ref={canvasRef}
+          camera={{
+            position: [
+              settings.cameraDistance,
+              settings.cameraDistance,
+              settings.cameraDistance,
+            ],
+            fov: 50,
+          }}
+          shadows
+          className='h-full w-full'
+          gl={{
+            preserveDrawingBuffer: true,
+            antialias: true,
+            alpha: false,
+            // Unreal Engine optimized settings
+            toneMapping: isGLTFModel
+              ? THREE.ACESFilmicToneMapping
+              : THREE.LinearToneMapping,
+            toneMappingExposure: isGLTFModel ? 1.0 : 1.2, // Lower exposure for UE GLTF assets
+            outputColorSpace: THREE.SRGBColorSpace,
+          }}
+          scene={{ background: new THREE.Color(0xf5f5f5) }}
+        >
+          <Suspense fallback={null}>
+            {/* Unreal Engine optimized lighting setup */}
 
-          {/* Hemisphere light - reduced when lightmaps are present */}
-          <hemisphereLight
-            color={0xffffff}
-            groundColor={0x888888}
-            intensity={hasLightmaps ? 0.3 : 1.0}
-          />
+            {/* Ambient light - much more subtle */}
+            <ambientLight
+              intensity={isGLTFModel ? 0.1 : hasLightmaps ? 0.15 : 0.3}
+              color={0xffffff}
+            />
 
-          {/* Point lights - reduced when lightmaps are present */}
-          <pointLight
-            position={[10, 10, 10]}
-            intensity={hasLightmaps ? 0.3 : 0.8}
-            color={0xffffff}
-          />
-          <pointLight
-            position={[-10, 10, -10]}
-            intensity={hasLightmaps ? 0.3 : 0.8}
-            color={0xffffff}
-          />
-          <pointLight
-            position={[0, -5, 0]}
-            intensity={hasLightmaps ? 0.2 : 0.6}
-            color={0xffffff}
-          />
-          <pointLight
-            position={[5, 0, -5]}
-            intensity={hasLightmaps ? 0.2 : 0.6}
-            color={0xffffff}
-          />
+            {/* Main directional light - much reduced intensity */}
+            <directionalLight
+              position={[10, 10, 5]}
+              intensity={isGLTFModel ? 0.8 : hasLightmaps ? 1.0 : 1.5}
+              color={0xffffff}
+              castShadow={!hasLightmaps && !isGLTFModel}
+              shadow-mapSize-width={2048}
+              shadow-mapSize-height={2048}
+              shadow-camera-far={50}
+              shadow-camera-left={-15}
+              shadow-camera-right={15}
+              shadow-camera-top={15}
+              shadow-camera-bottom={-15}
+              shadow-bias={-0.0001}
+            />
 
-          <OrbitControls
-            enablePan={true}
-            enableZoom={true}
-            enableRotate={true}
-            dampingFactor={0.05}
-          />
+            {/* Fill light - very subtle */}
+            <directionalLight
+              position={[-8, 4, -6]}
+              intensity={isGLTFModel ? 0.2 : hasLightmaps ? 0.3 : 0.5}
+              color={0xffeedd}
+            />
 
-          {/* Environment mapping - less intense when lightmaps are present */}
-          <Environment preset={'city'} background={false} />
+            {/* Rim light - minimal */}
+            <directionalLight
+              position={[0, 5, -10]}
+              intensity={isGLTFModel ? 0.15 : hasLightmaps ? 0.25 : 0.4}
+              color={0xccddff}
+            />
 
-          {modelData ? (
-            <Bounds fit clip observe>
+            {/* Environment lighting - much reduced */}
+            <Environment
+              files={'/textures/belfast_sunset_puresky_4k.hdr'}
+              background={false}
+              environmentIntensity={
+                isGLTFModel ? 0.1 : hasLightmaps ? 0.2 : 0.4
+              }
+            />
+
+            <OrbitControls
+              enablePan={!actualIsRecording}
+              enableZoom={!actualIsRecording}
+              enableRotate={!actualIsRecording}
+              dampingFactor={0.05}
+            />
+
+            {modelData ? (
               <LoadedModel
                 modelData={modelData}
-                autoRotate={settings.autoRotate && !isRecording}
+                autoRotate={settings.autoRotate && !actualIsRecording}
                 rotationSpeed={settings.rotationSpeed}
-                isRecording={isRecording}
-                recordingProgress={recordingProgress}
+                isRecording={actualIsRecording}
+                recordingProgress={actualRecordingProgress}
               />
-            </Bounds>
-          ) : (
-            <EmptyState />
-          )}
-        </Suspense>
-      </Canvas>
-    </div>
-  );
-}
+            ) : (
+              <EmptyState />
+            )}
+          </Suspense>
+        </Canvas>
+      </div>
+    );
+  }
+);
+
+ModelViewer.displayName = 'ModelViewer';
